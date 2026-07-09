@@ -254,6 +254,11 @@ static cl::opt<bool> UseContextForNoWrapFlagInference(
     cl::desc("Infer nuw/nsw flags using context where suitable"),
     cl::init(true));
 
+static cl::opt<bool> PropagateGuardsThroughZExtAdd(
+    "scalar-evolution-propagate-guards-through-zext-add", cl::Hidden,
+    cl::desc("Propagate loop guards through zext of add sub-expressions"),
+    cl::init(true));
+
 //===----------------------------------------------------------------------===//
 //                           SCEV class definitions
 //===----------------------------------------------------------------------===//
@@ -16126,6 +16131,53 @@ void ScalarEvolution::LoopGuards::collectFromBlock(
       append_range(Worklist, S->operands());
     };
 
+    // From zext(C + Y) >=u RHS (or >) synthesize an extra guard
+    // Y >=u trunc(RHS - sext(C)) by registering Y -> umax(Y, K) in the
+    // rewrite map.
+    auto TryTightenYFromZExtAddUGE = [&](const SCEV *From,
+                                         const SCEV *RHS) -> bool {
+      if (!PropagateGuardsThroughZExtAdd)
+        return false;
+
+      const SCEVAddExpr *Inner;
+      const APInt *C;
+      const SCEVUnknown *Y;
+      // Restrict Y to SCEVUnknown: that is the shape SCEVLoopGuardRewriter
+      // reliably picks up from the map.
+      if (!match(From, m_scev_ZExt(m_scev_Add(Inner))) ||
+          !match(Inner, m_scev_Add(m_scev_APInt(C), m_SCEVUnknown(Y))))
+        return false;
+
+      const SCEV *YRewritten = GetMaybeRewritten(Y);
+      APInt YUnsignedMin = SE.getUnsignedRangeMin(YRewritten);
+      // For C < 0 narrow wrap gives a huge bit pattern that trivially
+      // satisfies the guard; rule it out via Y >=u |C| so (C+Y) narrow
+      // equals sext(C) + zext(Y) in wide.
+      if (C->isNegative() && !YUnsignedMin.uge(C->abs()))
+        return false;
+
+      // 1) YMin = RHS - sext(C) is the wide bound zext(Y) must reach so
+      //    that sext(C) + zext(Y) >=u RHS in the no-wrap case.
+      // 2) For C >= 0 the wrap case is self-excluded: a wrapped
+      //    narrow(C+Y) is < C = sext(C) = RHS - YMin, so as long as
+      //    YMin > 0 the wrap value falls below RHS and cannot satisfy
+      //    the guard.
+      // 3) isIntN keeps YMin representable in narrow bits so we can
+      //    express the tightened bound in Y's own type.
+      unsigned NarrowBW = Y->getType()->getScalarSizeInBits();
+      unsigned WideBW = From->getType()->getScalarSizeInBits();
+      std::optional<APInt> YMin = SE.computeConstantDifference(
+          RHS, SE.getConstant(C->sext(WideBW)));
+      if (!YMin || !YMin->isStrictlyPositive() || !YMin->isIntN(NarrowBW))
+        return false;
+
+      // E.g. zext(3 + Y) >=u 10 -> YTight = umax(Y, 7).
+      const SCEV *YMinNarrow = SE.getConstant(YMin->trunc(NarrowBW));
+      const SCEV *YTight = SE.getUMaxExpr(YRewritten, YMinNarrow);
+      AddRewrite(Y, YRewritten, YTight);
+      return true;
+    };
+
     while (!Worklist.empty()) {
       const SCEV *From = Worklist.pop_back_val();
       if (isa<SCEVConstant>(From))
@@ -16150,6 +16202,14 @@ void ScalarEvolution::LoopGuards::collectFromBlock(
         break;
       case CmpInst::ICMP_UGT:
       case CmpInst::ICMP_UGE:
+        // Map[Y] now carries the descent that already implies the
+        // outer >= RHS bound, so the default outer umax is redundant.
+        // Exception: an earlier guard may have put a Map[From] entry
+        // for this zext already - then fall through so umax(old, RHS)
+        // can refine it (monotonically at least as precise).
+        if (TryTightenYFromZExtAddUGE(From, RHS) &&
+            !RewriteMap.contains(From))
+          break;
         To = SE.getUMaxExpr(FromRewritten, RHS);
         if (auto *UMin = dyn_cast<SCEVUMinExpr>(FromRewritten))
           EnqueueOperands(UMin);
