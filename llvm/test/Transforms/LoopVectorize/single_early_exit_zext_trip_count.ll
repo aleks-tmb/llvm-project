@@ -11,7 +11,7 @@
 ;   AccessSize = (9 + (zext i32 (-1 + %len)<nsw> to i64))<nuw><nsw>
 ;   KnownSize = (8 + (zext i32 %len to i64))<nuw><nsw>
 ;
-; TODO: when applying loop guards SCEV should move -1 outside the zext and fold
+; when applying loop guards SCEV should move -1 outside the zext and fold
 ; it with the outer 9. Then AccessSize and KnownSize would have equal
 ; loop-guarded forms, so ULE would be trivially true.
 define void @test1(ptr %p) {
@@ -28,17 +28,43 @@ define void @test1(ptr %p) {
 ; CHECK:       preheader:
 ; CHECK-NEXT:    [[EXIT_32:%.*]] = add nsw i32 [[LEN]], -1
 ; CHECK-NEXT:    [[EXIT:%.*]] = zext i32 [[EXIT_32]] to i64
+; CHECK-NEXT:    [[TMP0:%.*]] = add nuw nsw i64 [[EXIT]], 1
+; CHECK-NEXT:    [[MIN_ITERS_CHECK:%.*]] = icmp ult i64 [[TMP0]], 4
+; CHECK-NEXT:    br i1 [[MIN_ITERS_CHECK]], label [[SCALAR_PH:%.*]], label [[VECTOR_PH:%.*]]
+; CHECK:       vector.ph:
+; CHECK-NEXT:    [[N_MOD_VF:%.*]] = urem i64 [[TMP0]], 4
+; CHECK-NEXT:    [[IV_NEXT:%.*]] = sub i64 [[TMP0]], [[N_MOD_VF]]
 ; CHECK-NEXT:    br label [[LOOP:%.*]]
+; CHECK:       vector.body:
+; CHECK-NEXT:    [[INDEX:%.*]] = phi i64 [ 0, [[VECTOR_PH]] ], [ [[INDEX_NEXT:%.*]], [[VECTOR_BODY_INTERIM:%.*]] ]
+; CHECK-NEXT:    [[TMP1:%.*]] = getelementptr inbounds nuw i8, ptr [[BASE]], i64 [[INDEX]]
+; CHECK-NEXT:    [[WIDE_LOAD:%.*]] = load <4 x i8>, ptr [[TMP1]], align 1
+; CHECK-NEXT:    [[TMP2:%.*]] = icmp eq <4 x i8> [[WIDE_LOAD]], zeroinitializer
+; CHECK-NEXT:    [[TMP3:%.*]] = freeze <4 x i1> [[TMP2]]
+; CHECK-NEXT:    [[TMP4:%.*]] = call i1 @llvm.vector.reduce.or.v4i1(<4 x i1> [[TMP3]])
+; CHECK-NEXT:    [[INDEX_NEXT]] = add nuw i64 [[INDEX]], 4
+; CHECK-NEXT:    [[TMP5:%.*]] = icmp eq i64 [[INDEX_NEXT]], [[IV_NEXT]]
+; CHECK-NEXT:    br i1 [[TMP4]], label [[VECTOR_EARLY_EXIT:%.*]], label [[VECTOR_BODY_INTERIM]]
+; CHECK:       vector.body.interim:
+; CHECK-NEXT:    br i1 [[TMP5]], label [[LATCH:%.*]], label [[LOOP]], !llvm.loop [[LOOP1:![0-9]+]]
+; CHECK:       middle.block:
+; CHECK-NEXT:    [[CMP_N:%.*]] = icmp eq i64 [[TMP0]], [[IV_NEXT]]
+; CHECK-NEXT:    br i1 [[CMP_N]], label [[RET_LOOPEXIT:%.*]], label [[SCALAR_PH]]
+; CHECK:       vector.early.exit:
+; CHECK-NEXT:    br label [[RET_LOOPEXIT]]
+; CHECK:       scalar.ph:
+; CHECK-NEXT:    [[IV:%.*]] = phi i64 [ [[IV_NEXT]], [[LATCH]] ], [ 0, [[PREHEADER]] ]
+; CHECK-NEXT:    br label [[LOOP2:%.*]]
 ; CHECK:       loop:
-; CHECK-NEXT:    [[IV:%.*]] = phi i64 [ [[IV_NEXT:%.*]], [[LATCH:%.*]] ], [ 0, [[PREHEADER]] ]
-; CHECK-NEXT:    [[ELEM_PTR:%.*]] = getelementptr inbounds nuw i8, ptr [[BASE]], i64 [[IV]]
+; CHECK-NEXT:    [[IV1:%.*]] = phi i64 [ [[IV_NEXT1:%.*]], [[LATCH1:%.*]] ], [ [[IV]], [[SCALAR_PH]] ]
+; CHECK-NEXT:    [[ELEM_PTR:%.*]] = getelementptr inbounds nuw i8, ptr [[BASE]], i64 [[IV1]]
 ; CHECK-NEXT:    [[ELEM:%.*]] = load i8, ptr [[ELEM_PTR]], align 1
 ; CHECK-NEXT:    [[IS_TARGET:%.*]] = icmp eq i8 [[ELEM]], 0
-; CHECK-NEXT:    br i1 [[IS_TARGET]], label [[DEOPT:%.*]], label [[LATCH]]
+; CHECK-NEXT:    br i1 [[IS_TARGET]], label [[RET_LOOPEXIT]], label [[LATCH1]]
 ; CHECK:       latch:
-; CHECK-NEXT:    [[IV_NEXT]] = add nuw nsw i64 [[IV]], 1
-; CHECK-NEXT:    [[LOOP_COND:%.*]] = icmp ult i64 [[IV]], [[EXIT]]
-; CHECK-NEXT:    br i1 [[LOOP_COND]], label [[LOOP]], label [[DEOPT]]
+; CHECK-NEXT:    [[IV_NEXT1]] = add nuw nsw i64 [[IV1]], 1
+; CHECK-NEXT:    [[LOOP_COND:%.*]] = icmp ult i64 [[IV1]], [[EXIT]]
+; CHECK-NEXT:    br i1 [[LOOP_COND]], label [[LOOP2]], label [[RET_LOOPEXIT]], !llvm.loop [[LOOP4:![0-9]+]]
 ; CHECK:       ret.loopexit:
 ; CHECK-NEXT:    br label [[RET]]
 ; CHECK:       ret:

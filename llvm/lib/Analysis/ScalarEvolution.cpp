@@ -16397,6 +16397,25 @@ const SCEV *ScalarEvolution::LoopGuards::rewrite(const SCEV *Expr) const {
         Bitwidth = Bitwidth / 2;
       }
 
+      // zext(C + X)<nsw> -> sext(C) + zext(X) when guard-rewritten X >=u |C|:
+      // narrow(C + X) is non-negative, so the wide value coincides bit-for-bit
+      // with sext(C) + zext(X). Only meaningful for C < 0; positive C is a
+      // trivial no-op fold.
+      if (auto *SA = dyn_cast<SCEVAddExpr>(Op)) {
+        const APInt *C;
+        const SCEV *X;
+        if (SA->hasNoSignedWrap() &&
+            match(SA, m_scev_Add(m_scev_APInt(C), m_SCEV(X))) &&
+            C->isNegative()) {
+          const SCEV *XRewritten = visit(X);
+          if (SE.isKnownPredicateViaConstantRanges(
+                  CmpInst::ICMP_UGE, XRewritten, SE.getConstant(-*C)))
+            return SE.getAddExpr(
+                SE.getSignExtendExpr(SA->getOperand(0), Ty),
+                SE.getZeroExtendExpr(XRewritten, Ty), SCEV::FlagNSW);
+        }
+      }
+
       return SCEVRewriteVisitor<SCEVLoopGuardRewriter>::visitZeroExtendExpr(
           Expr);
     }
