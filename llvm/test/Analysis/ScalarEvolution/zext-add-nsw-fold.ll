@@ -107,7 +107,7 @@ define i64 @mul_umax_fold_round_up(i8 %x) {
 ; CHECK-NEXT:    %add = add nsw i32 -10, %mul
 ; CHECK-NEXT:    --> (-10 + (4 * (3 umax (zext i8 %x to i32)))<nuw><nsw>)<nsw> U: [2,1011) S: [2,1011)
 ; CHECK-NEXT:    %ext = zext i32 %add to i64
-; CHECK-NEXT:    --> (2 + (zext i32 (-12 + (4 * (3 umax (zext i8 %x to i32)))<nuw><nsw>)<nsw> to i64))<nuw><nsw> U: [2,1011) S: [2,1011)
+; CHECK-NEXT:    --> (-10 + (4 * (3 umax (zext i8 %x to i64)))<nuw><nsw>)<nsw> U: [2,1011) S: [2,1011)
 ; CHECK-NEXT:  Determining loop execution counts for: @mul_umax_fold_round_up
 ;
   %zx = zext i8 %x to i32
