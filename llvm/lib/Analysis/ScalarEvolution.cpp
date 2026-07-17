@@ -16418,6 +16418,26 @@ const SCEV *ScalarEvolution::LoopGuards::rewrite(const SCEV *Expr) const {
         Bitwidth = Bitwidth / 2;
       }
 
+      // Pull a negative constant out of the zext when the remainder is known
+      // large enough that the narrow add does not unsigned-wrap:
+      //   zext(-C + Rest) -> zext(Rest) - C_ext, if Rest >=u C.
+      if (const auto *Add = dyn_cast<SCEVAddExpr>(Op)) {
+        const auto *C = dyn_cast<SCEVConstant>(Add->getOperand(0));
+        if (C && C->getAPInt().isNegative()) {
+          SmallVector<SCEVUse, 4> RestOps(llvm::drop_begin(Add->operands()));
+          const SCEV *Rest = SE.getAddExpr(RestOps);
+          // Rewrite Rest first so guard clamps (e.g. umax(Rest, K)) can
+          // supply the lower bound for the range check below.
+          const SCEV *GuardedRest = visit(Rest);
+          APInt AbsC = -C->getAPInt();
+          if (SE.getUnsignedRangeMin(GuardedRest).uge(AbsC))
+            return SE.getMinusSCEV(
+                SE.getZeroExtendExpr(GuardedRest, Ty),
+                SE.getConstant(AbsC.zext(Ty->getScalarSizeInBits())),
+                SCEV::FlagNUW);
+        }
+      }
+
       return SCEVRewriteVisitor<SCEVLoopGuardRewriter>::visitZeroExtendExpr(
           Expr);
     }
