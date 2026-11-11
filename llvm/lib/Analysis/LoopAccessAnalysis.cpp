@@ -178,10 +178,16 @@ static const SCEV *mulSCEVNoOverflow(const SCEV *A, const SCEV *B,
 /// Return true, if evaluating \p AR at \p MaxBTC cannot wrap, because \p AR at
 /// \p MaxBTC is guaranteed inbounds of the accessed object. This does not imply
 /// that the whole accessed range is dereferenceable.
+///
+/// \p LowIsSafe is set to true for a negative step if the lowest accessed byte,
+/// \p AR at \p MaxBTC, is known not to fall below the start of the object. It
+/// is set to false otherwise, including for a non-negative step.
 static bool evaluatePtrAddRecAtMaxBTCWillNotWrap(
     const SCEVAddRecExpr *AR, const SCEV *MaxBTC, const SCEV *EltSize,
     ScalarEvolution &SE, const DataLayout &DL, DominatorTree *DT,
-    AssumptionCache *AC, ScalarEvolution::LoopGuards &LoopGuards) {
+    AssumptionCache *AC, ScalarEvolution::LoopGuards &LoopGuards,
+    bool &LowIsSafe) {
+  LowIsSafe = false;
   auto *PointerBase = SE.getPointerBase(AR->getStart());
   auto *StartPtr = dyn_cast<SCEVUnknown>(PointerBase);
   if (!StartPtr)
@@ -283,6 +289,7 @@ static bool evaluatePtrAddRecAtMaxBTCWillNotWrap(
     assert(SE.isKnownNegative(Step) && "must be known negative");
     if (!SE.isKnownPredicate(CmpInst::ICMP_UGE, StartOffset, DistToLastIter))
       return false;
+    LowIsSafe = true;
     MaxOffset = StartOffset;
   }
   // MaxOffset must not exceed the deref-region end.
@@ -411,14 +418,16 @@ std::pair<const SCEV *, const SCEV *> llvm::getStartAndEndForAccess(
     // The address of the last accessed element, if it can be computed
     // precisely.
     const SCEV *LastAddr = nullptr;
+    bool LowIsSafe = false;
     if (!isa<SCEVCouldNotCompute>(BTC)) {
       // Evaluating AR at an exact BTC is safe: LAA separately checks that
       // accesses cannot wrap in the loop. If evaluating AR at BTC wraps, then
       // the loop either triggers UB when executing a memory access with a
       // poison pointer or the wrapping/poisoned pointer is not used.
       LastAddr = AR->evaluateAtIteration(BTC, *SE);
-    } else if (evaluatePtrAddRecAtMaxBTCWillNotWrap(
-                   AR, MaxBTC, EltSizeSCEV, *SE, DL, DT, AC, LoopGuards)) {
+    } else if (evaluatePtrAddRecAtMaxBTCWillNotWrap(AR, MaxBTC, EltSizeSCEV, *SE,
+                                                    DL, DT, AC, LoopGuards,
+                                                    LowIsSafe)) {
       LastAddr = AR->evaluateAtIteration(MaxBTC, *SE);
     }
     const SCEV *Start = AR->getStart();
